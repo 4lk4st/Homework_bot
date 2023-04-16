@@ -1,15 +1,15 @@
-import requests
-import os
 import logging
-import time
-import telegram
+import os
 import sys
-
-
-from dotenv import load_dotenv
-from exceptions import TokensFromEnvError, APIResponseError
+import time
 from http import HTTPStatus
 
+import requests
+import telegram
+from dotenv import load_dotenv
+
+from exceptions import (APIResponseError, BadStatusError,
+                        NoHwNameError, NoStatusError)
 
 load_dotenv()
 
@@ -42,26 +42,17 @@ error_counter = {}
 
 def check_tokens() -> bool:
     """Проверяет доступность переменных окружения."""
-    env_vars = [PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]
-
-    for var in env_vars:
-        if var is None or len(var) < 1:
-            result = False
-            logger.critical('Переменные окружения недоступны!')
-            break
-        else:
-            result = True
-
-    return result
+    return all([PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID])
 
 
 def send_message(bot: telegram.Bot, message: str) -> None:
     """Отправляет сообщение в Telegram чат."""
     try:
         bot.send_message(TELEGRAM_CHAT_ID, message)
-        logger.debug('Сообщение отправлено успешно!')
     except Exception:
         logger.error('Сбой при отправке сообщения в Telegram')
+    else:
+        logger.debug('Сообщение отправлено успешно!')
 
 
 def get_api_answer(timestamp: int) -> dict:
@@ -79,13 +70,13 @@ def get_api_answer(timestamp: int) -> dict:
             ENDPOINT,
             headers=HEADERS,
             params=params)
-    except requests.RequestException as error:
-        logger.error(f'Ошибка запроса к API: {error}')
+    except requests.RequestException:
+        raise APIResponseError('Не удается получить данные от API')
 
     # Проверяем статус ответа сервера.
     if response.status_code != HTTPStatus.OK:
-        logger.error('Статус ответа от сервера Yandex не "ОК"')
-        raise requests.exceptions.HTTPError
+        raise requests.exceptions.HTTPError(
+            'Некорректный статус ответа Yandex')
 
     return response.json()
 
@@ -98,23 +89,14 @@ def check_response(response: dict) -> bool:
     """
     result = True
 
-    # Если в ответе API получен список вместо словаря
     if not isinstance(response, dict):
-        msg = 'В ответе API получен не словарь'
-        logger.error(msg)
-        raise TypeError(msg)
+        raise TypeError('В ответе API получен не словарь')
 
-    # Если в ответе API нет ключа:
     if response.get('homeworks') is None:
-        msg = "В ответе API нет ключа 'homework'"
-        logger.error(msg)
-        raise KeyError(msg)
+        raise KeyError("В ответе API нет ключа 'homework'")
 
-    # Если в ответе API перечень заданий не в виде списка
     if not isinstance(response['homeworks'], list):
-        msg = 'В ответе API перечень заданий не в виде списка'
-        logger.error(msg)
-        raise TypeError(msg)
+        raise TypeError('В ответе API перечень заданий не в виде списка')
 
     return result
 
@@ -125,20 +107,19 @@ def parse_status(homework: dict) -> str:
     В случае успеха, функция возвращает подготовленную
     для отправки в Telegram строку.
     """
-    # Если в ответе API статус работы - неожиданный.
-    if homework['status'] not in HOMEWORK_VERDICTS.keys():
-        msg = 'Неожиданный статус домашней работы, обнаруженный в ответе API'
-        logger.error(msg)
-        raise KeyError(msg)
+    homework_name = homework.get('homework_name')
+    homework_status = homework.get('status')
 
-    # Если в ответе API нет ключа "homework_name".
-    if homework.get('homework_name') is None:
-        msg = 'В ответе API нет ключа "homework_name"'
-        logger.error(msg)
-        raise KeyError(msg)
+    if homework_status is None:
+        raise NoStatusError
 
-    homework_name = homework['homework_name']
-    verdict = HOMEWORK_VERDICTS[homework['status']]
+    if homework_status not in HOMEWORK_VERDICTS.keys():
+        raise BadStatusError
+
+    if homework_name is None:
+        raise NoHwNameError
+
+    verdict = HOMEWORK_VERDICTS[homework_status]
 
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
@@ -146,32 +127,33 @@ def parse_status(homework: dict) -> str:
 def main():
     """Основная логика работы бота."""
     if not check_tokens():
-        raise TokensFromEnvError('Переменные окружения недоступны!')
+        logger.critical('Переменные окружения недоступны!')
+        sys.exit()
 
     bot = telegram.Bot(token=TELEGRAM_TOKEN)
-
     timestamp = int(time.time())
-    old_status = 0
+    if not check_response(get_api_answer(timestamp)):
+        send_message(bot, 'Ответ API Yandex не соответствует ожидаемому')
 
+    old_status = 0
     while True:
         try:
             response = get_api_answer(timestamp)
-
-            if not check_response(response):
-                send_message(bot,
-                             'Ответ API Yandex не соответствует ожидаемому')
-                raise APIResponseError(
-                    'Ответ API Yandex не соответствует ожидаемому')
 
             if not response['homeworks']:
                 logger.info('Список домашних заданий пуст')
             else:
                 try:
                     current_status = parse_status(response['homeworks'][0])
-                except KeyError:
-                    send_message(bot,
-                                 ('Неожиданный статус домашней работы,',
-                                  'обнаруженный в ответе API'))
+                except NoStatusError:
+                    logger.error(
+                        'В ответе API нет ключа "status"')
+                except BadStatusError:
+                    logger.error(
+                        'Неожиданный статус домашней работы в ответе API')
+                except NoHwNameError:
+                    logger.error(
+                        'В ответе API нет ключа "homework_name"')
 
                 if current_status != old_status:
                     send_message(bot, current_status)
@@ -182,8 +164,8 @@ def main():
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
             logger.critical(message)
-
-        time.sleep(RETRY_PERIOD)
+        finally:
+            time.sleep(RETRY_PERIOD)
 
 
 if __name__ == '__main__':

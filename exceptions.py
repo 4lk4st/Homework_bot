@@ -1,5 +1,11 @@
-class TokensFromEnvError(Exception):
+class APIResponseError(Exception):
     pass
 
-class APIResponseError(Exception):
+class NoStatusError(KeyError):
+    pass
+
+class BadStatusError(KeyError):
+    pass
+
+class NoHwNameError(KeyError):
     pass
