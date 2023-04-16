@@ -111,13 +111,13 @@ def parse_status(homework: dict) -> str:
     homework_status = homework.get('status')
 
     if homework_status is None:
-        raise NoStatusError
+        raise NoStatusError('В ответе API нет ключа "status"')
 
     if homework_status not in HOMEWORK_VERDICTS.keys():
-        raise BadStatusError
+        raise BadStatusError('Неожиданный статус домашней работы в ответе API')
 
     if homework_name is None:
-        raise NoHwNameError
+        raise NoHwNameError('В ответе API нет ключа "homework_name"')
 
     verdict = HOMEWORK_VERDICTS[homework_status]
 
@@ -143,17 +143,7 @@ def main():
             if not response['homeworks']:
                 logger.info('Список домашних заданий пуст')
             else:
-                try:
-                    current_status = parse_status(response['homeworks'][0])
-                except NoStatusError:
-                    logger.error(
-                        'В ответе API нет ключа "status"')
-                except BadStatusError:
-                    logger.error(
-                        'Неожиданный статус домашней работы в ответе API')
-                except NoHwNameError:
-                    logger.error(
-                        'В ответе API нет ключа "homework_name"')
+                current_status = parse_status(response['homeworks'][0])
 
                 if current_status != old_status:
                     send_message(bot, current_status)
@@ -163,7 +153,7 @@ def main():
 
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
-            logger.critical(message)
+            logger.error(message)
         finally:
             time.sleep(RETRY_PERIOD)
 
